@@ -84,6 +84,27 @@ export const MIGRATIONS = [
       DROP TABLE IF EXISTS admins;
     `,
   },
+  {
+    version: 2,
+    name: 'v2_add_exam_progress_session',
+    up(db) {
+      const cols = db.prepare("PRAGMA table_info('exam_progress')").all();
+      const hasSessionCol = cols.some((c) => c.name === 'session_json');
+      if (!hasSessionCol) {
+        db.exec(
+          "ALTER TABLE exam_progress ADD COLUMN session_json TEXT NOT NULL DEFAULT '{}';"
+        );
+      }
+    },
+    down(db) {
+      // SQLite >= 3.35 supports ALTER TABLE DROP COLUMN
+      const cols = db.prepare("PRAGMA table_info('exam_progress')").all();
+      const hasSessionCol = cols.some((c) => c.name === 'session_json');
+      if (hasSessionCol) {
+        db.exec('ALTER TABLE exam_progress DROP COLUMN session_json;');
+      }
+    },
+  },
 ];
 
 export function ensureMigrationsTable(db) {

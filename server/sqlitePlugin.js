@@ -22,6 +22,9 @@ export function loadEnvConfig() {
           val = val.slice(1, -1);
         }
         config[key] = val;
+        if (process.env[key] === undefined) {
+          process.env[key] = val;
+        }
       }
     }
   }
