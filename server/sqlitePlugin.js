@@ -28,6 +28,8 @@ export function loadEnvConfig() {
   return config;
 }
 
+export const loadEnvFile = loadEnvConfig;
+
 const initialEnv = loadEnvConfig();
 const DB_PATH = path.resolve(process.cwd(), initialEnv.DB_PATH || './cloudexam.sqlite');
 const BACKUP_DIR = path.resolve(process.cwd(), initialEnv.BACKUP_DIR || './backup');
