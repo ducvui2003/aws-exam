@@ -1,0 +1,106 @@
+name: CI/CD Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Build & Deploy to VPS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Prepare SSH Key and Known Hosts
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "$VPS_SSH_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          PORT="${VPS_PORT:-22}"
+          ssh-keyscan -p "$PORT" -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Sync project files to VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_DEPLOY_PATH: ${{ secrets.VPS_DEPLOY_PATH }}
+        run: |
+          PORT="${VPS_PORT:-22}"
+          USER="${VPS_USER:-root}"
+          DEPLOY_PATH="${VPS_DEPLOY_PATH:-/var/www/cloudexam_saa}"
+
+          ssh -p "$PORT" "$USER@$VPS_HOST" "mkdir -p $DEPLOY_PATH"
+
+          rsync -avz --delete \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude 'node_modules' \
+            --exclude '*.sqlite*' \
+            --exclude '.env' \
+            -e "ssh -p $PORT" \
+            ./ "$USER@$VPS_HOST:$DEPLOY_PATH/"
+
+      - name: Write .env, Run Migrations & Restart PM2 on VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_DEPLOY_PATH: ${{ secrets.VPS_DEPLOY_PATH }}
+          ENV_FILE: ${{ secrets.ENV_FILE }}
+        run: |
+          PORT="${VPS_PORT:-22}"
+          USER="${VPS_USER:-root}"
+          DEPLOY_PATH="${VPS_DEPLOY_PATH:-/var/www/cloudexam_saa}"
+
+          # Write .env file on VPS if ENV_FILE secret is provided
+          if [ -n "$ENV_FILE" ]; then
+            printf "%s\n" "$ENV_FILE" | ssh -p "$PORT" "$USER@$VPS_HOST" "cat > $DEPLOY_PATH/.env"
+          fi
+
+          ssh -p "$PORT" "$USER@$VPS_HOST" << EOF
+            set -e
+            export PATH="\$PATH:/usr/local/bin:~/.nvm/versions/node/\$(ls ~/.nvm/versions/node 2>/dev/null | tail -n 1)/bin"
+            cd "$DEPLOY_PATH"
+
+            # Ensure .env exists (fallback to .env.example if not created yet)
+            if [ ! -f .env ] && [ -f .env.example ]; then
+              cp .env.example .env
+            fi
+
+            # Run SQLite database migrations
+            npm run migrate
+
+            # Start or reload PM2 process
+            if command -v pm2 >/dev/null 2>&1; then
+              pm2 startOrReload ecosystem.config.cjs --update-env
+              pm2 save
+            else
+              echo "PM2 not found globally, installing pm2..."
+              npm install -g pm2
+              pm2 startOrReload ecosystem.config.cjs --update-env
+              pm2 save
+            fi
+          EOF

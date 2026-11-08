@@ -1,0 +1,81 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  html {
+    -webkit-tap-highlight-color: transparent;
+    scroll-behavior: smooth;
+  }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    overflow-x: hidden;
+  }
+}
+
+/* Rich HTML content styling for exam questions, answers, and explanations */
+.exam-html {
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+  word-break: break-word;
+}
+.exam-html p {
+  margin-bottom: 0.65rem;
+  line-height: 1.65;
+}
+.exam-html p:last-child {
+  margin-bottom: 0;
+}
+.exam-html p:empty {
+  display: none;
+}
+.exam-html ul,
+.exam-html ol {
+  margin: 0.5rem 0 0.85rem 1.25rem;
+}
+.exam-html ul {
+  list-style-type: disc;
+}
+.exam-html ol {
+  list-style-type: decimal;
+}
+.exam-html li {
+  margin-bottom: 0.35rem;
+  line-height: 1.6;
+}
+.exam-html li p {
+  margin-bottom: 0.25rem;
+}
+.exam-html strong {
+  font-weight: 600;
+}
+.exam-html u {
+  text-underline-offset: 3px;
+}
+.exam-html img {
+  display: block;
+  width: 100% !important;
+  max-width: 100% !important;
+  height: auto !important;
+  border-radius: 0.75rem;
+  border: 1px solid #e2e8f0;
+  margin: 0.75rem auto;
+  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.08);
+  cursor: zoom-in;
+}
+.dark .exam-html img {
+  border-color: #334155;
+}
+.answer-html {
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+  word-break: break-word;
+}
+.answer-html p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* Safe area bottom padding for iPhone home indicator */
+.safe-bottom {
+  padding-bottom: max(0.65rem, env(safe-area-inset-bottom));
+}
