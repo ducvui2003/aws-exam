@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   BookOpen,
   Clock,
@@ -42,6 +42,7 @@ const STORAGE_KEY = 'aws_saa_exam_progress_v1';
 const HISTORY_STORAGE_KEY = 'aws_saa_exam_history_v1';
 const ADMIN_TOKEN_KEY = 'aws_saa_admin_token';
 const ADMIN_USER_KEY = 'aws_saa_admin_user';
+const EXAM_DURATION_SECONDS = 130 * 60; // 130 minutes
 
 function loadSavedProgress() {
   try {
@@ -120,9 +121,10 @@ function isAnswerSetCorrect(correctAnswers = [], selectedAnswers = []) {
 }
 
 function formatTime(seconds) {
-  const hrs = Math.floor(seconds / 3600);
-  const mins = Math.floor((seconds % 3600) / 60);
-  const secs = seconds % 60;
+  const safe = Math.max(0, Number(seconds) || 0);
+  const hrs = Math.floor(safe / 3600);
+  const mins = Math.floor((safe % 3600) / 60);
+  const secs = safe % 60;
   if (hrs > 0) {
     return `${hrs}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
   }
@@ -219,7 +221,7 @@ export default function App() {
   const [loginError, setLoginError] = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
 
-  // SQLite backend metadata (no file paths exposed)
+  // SQLite backend metadata
   const [sqliteInfo, setSqliteInfo] = useState({
     connected: false,
     backupCount: 6,
@@ -257,10 +259,12 @@ export default function App() {
   const [onlyRetryWrongIds, setOnlyRetryWrongIds] = useState(null);
   const [questionOrder, setQuestionOrder] = useState([]);
 
-  // Timer for Exam Mode (130 minutes = 7800 seconds)
-  const [timeLeft, setTimeLeft] = useState(130 * 60);
+  // Timer & Pause state for Exam Mode (130 minutes = 7800 seconds)
+  const [timeLeft, setTimeLeft] = useState(EXAM_DURATION_SECONDS);
   const [timerRunning, setTimerRunning] = useState(false);
+  const [examPausedModal, setExamPausedModal] = useState(false);
   const [examSubmitted, setExamSubmitted] = useState(false);
+  const autoSubmitTriggeredRef = useRef(false);
 
   // Lightbox for explanation images
   const [lightboxSrc, setLightboxSrc] = useState(null);
@@ -331,7 +335,7 @@ export default function App() {
     fetchSqliteState();
   }, [fetchExamsCatalogFromSqlite, fetchSqliteState]);
 
-  // Admin Login handler (verified against .env on server)
+  // Admin Login handler
   const handleAdminLogin = async (e) => {
     e.preventDefault();
     setLoginError('');
@@ -373,7 +377,6 @@ export default function App() {
     sessionStorage.removeItem(ADMIN_TOKEN_KEY);
   };
 
-  // Restore / Re-sync SQLite tables from backup folder
   const handleRestoreFromBackup = async () => {
     try {
       const res = await fetch('/api/admin/restore-backup', {
@@ -397,13 +400,6 @@ export default function App() {
     }
   };
 
-  // Scroll to top smoothly when changing questions
-  const goToQuestion = useCallback((idx) => {
-    setCurrentIdx(idx);
-    setMobileDrawerOpen(false);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }, []);
-
   // Active state source
   const currentExamProgress = useMemo(() => {
     if (previewAttempt) {
@@ -411,14 +407,16 @@ export default function App() {
         answers: previewAttempt.answers || {},
         revealed: {},
         flagged: previewAttempt.flagged || {},
+        session: null,
       };
     }
-    if (!activeExamId) return { answers: {}, revealed: {}, flagged: {} };
+    if (!activeExamId) return { answers: {}, revealed: {}, flagged: {}, session: null };
     return (
       allProgress[activeExamId] || {
         answers: {},
         revealed: {},
         flagged: {},
+        session: null,
       }
     );
   }, [previewAttempt, allProgress, activeExamId]);
@@ -427,7 +425,12 @@ export default function App() {
     (updater) => {
       if (!activeExamId || previewAttempt) return;
       setAllProgress((prev) => {
-        const current = prev[activeExamId] || { answers: {}, revealed: {}, flagged: {} };
+        const current = prev[activeExamId] || {
+          answers: {},
+          revealed: {},
+          flagged: {},
+          session: null,
+        };
         const nextExamState = typeof updater === 'function' ? updater(current) : updater;
         const nextAll = { ...prev, [activeExamId]: nextExamState };
         saveProgressToStorage(nextAll);
@@ -436,6 +439,67 @@ export default function App() {
       });
     },
     [activeExamId, previewAttempt]
+  );
+
+  // Save current session snapshot (mode, timeLeft, currentIdx, questionOrder, isPaused)
+  const persistCurrentSession = useCallback(
+    (overrides = {}) => {
+      if (!activeExamId || previewAttempt || examSubmitted || mode === 'review') return;
+      const sessionSnapshot = {
+        mode,
+        timeLeft,
+        currentIdx,
+        questionOrder,
+        isPaused: true,
+        updatedAt: new Date().toISOString(),
+        ...overrides,
+      };
+      updateExamProgress((prev) => ({
+        ...prev,
+        session: sessionSnapshot,
+      }));
+    },
+    [
+      activeExamId,
+      previewAttempt,
+      examSubmitted,
+      mode,
+      timeLeft,
+      currentIdx,
+      questionOrder,
+      updateExamProgress,
+    ]
+  );
+
+  // Scroll to top smoothly when changing questions
+  const goToQuestion = useCallback(
+    (idx) => {
+      setCurrentIdx(idx);
+      setMobileDrawerOpen(false);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      if (activeExamId && !previewAttempt && !examSubmitted && mode !== 'review') {
+        updateExamProgress((prev) => ({
+          ...prev,
+          session: {
+            mode,
+            timeLeft,
+            currentIdx: idx,
+            questionOrder,
+            isPaused: true,
+            updatedAt: new Date().toISOString(),
+          },
+        }));
+      }
+    },
+    [
+      activeExamId,
+      previewAttempt,
+      examSubmitted,
+      mode,
+      timeLeft,
+      questionOrder,
+      updateExamProgress,
+    ]
   );
 
   // Ordered questions list
@@ -490,7 +554,7 @@ export default function App() {
     };
   }, [orderedQuestions, currentExamProgress]);
 
-  // Save current progress as a new submitted attempt in SQLite
+  // Save current progress as a new submitted attempt in SQLite and clear active paused session
   const saveSubmissionToHistory = useCallback(
     async (submissionMode = mode) => {
       if (!activeExamId || !activeExamData) return;
@@ -520,7 +584,9 @@ export default function App() {
       const pct = total > 0 ? Math.round((correct / total) * 100) : 0;
       const scaledScore = total > 0 ? Math.round(100 + (correct / total) * 900) : 100;
       const durationSeconds =
-        submissionMode === 'exam' ? Math.max(0, 130 * 60 - timeLeft) : null;
+        submissionMode === 'exam'
+          ? Math.max(0, EXAM_DURATION_SECONDS - timeLeft)
+          : null;
 
       const newAttempt = {
         id: `${activeExamId}-attempt-${Date.now()}`,
@@ -549,33 +615,74 @@ export default function App() {
         return nextHistory;
       });
 
+      // Clear active paused session once submitted
+      setAllProgress((prev) => {
+        const nextAll = { ...prev };
+        delete nextAll[activeExamId];
+        saveProgressToStorage(nextAll);
+        return nextAll;
+      });
+      await apiSyncProgress(activeExamId, null);
+
       await apiSaveAttempt(activeExamId, newAttempt);
       fetchSqliteState();
 
       setExamSubmitted(true);
       setTimerRunning(false);
+      setExamPausedModal(false);
       setPreviewAttempt(newAttempt);
     },
     [activeExamId, activeExamData, allProgress, mode, timeLeft, fetchSqliteState]
   );
 
-  // Timer effect for Exam mode
+  // 1. Countdown Timer Tick Effect for Exam Mode
   useEffect(() => {
     if (mode !== 'exam' || !timerRunning || examSubmitted || previewAttempt) return;
     const interval = setInterval(() => {
-      setTimeLeft((prev) => {
-        if (prev <= 1) {
-          clearInterval(interval);
-          saveSubmissionToHistory('exam');
-          return 0;
-        }
-        return prev - 1;
-      });
+      setTimeLeft((prev) => (prev > 0 ? prev - 1 : 0));
     }, 1000);
     return () => clearInterval(interval);
-  }, [mode, timerRunning, examSubmitted, previewAttempt, saveSubmissionToHistory]);
+  }, [mode, timerRunning, examSubmitted, previewAttempt]);
 
-  // Start an exam (or open a specific submitted attempt for preview)
+  // 2. Auto-Submit Effect when Exam Mode Timer reaches 0
+  useEffect(() => {
+    if (
+      mode === 'exam' &&
+      !examSubmitted &&
+      !previewAttempt &&
+      timeLeft === 0 &&
+      !autoSubmitTriggeredRef.current
+    ) {
+      autoSubmitTriggeredRef.current = true;
+      setTimerRunning(false);
+      setExamPausedModal(false);
+      saveSubmissionToHistory('exam');
+    }
+  }, [mode, examSubmitted, previewAttempt, timeLeft, saveSubmissionToHistory]);
+
+  // Pause & Continue handlers in Exam Mode
+  const handlePauseExam = () => {
+    setTimerRunning(false);
+    setExamPausedModal(true);
+    persistCurrentSession({ isPaused: true });
+  };
+
+  const handleContinueExamFromModal = () => {
+    setExamPausedModal(false);
+    if (mode === 'exam' && !examSubmitted && !previewAttempt) {
+      setTimerRunning(true);
+    }
+  };
+
+  const handleSaveAndExitToHome = () => {
+    persistCurrentSession({ isPaused: true });
+    setTimerRunning(false);
+    setExamPausedModal(false);
+    setPreviewAttempt(null);
+    setActiveExamId(null);
+  };
+
+  // Start an exam (or continue a paused exam, or preview a submitted attempt)
   const startExam = (examId, selectedMode = 'practice', options = {}) => {
     const catalogEntry = examCatalog[examId];
     if (!catalogEntry || !catalogEntry.rawData) return;
@@ -583,13 +690,63 @@ export default function App() {
     const rawQuestions = catalogEntry.rawData.attemptAnswers || [];
     setActiveExamId(examId);
     setActiveExamData(catalogEntry.rawData);
-    setMode(selectedMode);
     setSearchQuery('');
     setStatusFilter('all');
     setOnlyRetryWrongIds(options.retryWrongIds || null);
     setMobileDrawerOpen(false);
     setHistoryModalExamId(null);
+    setExamPausedModal(false);
+    autoSubmitTriggeredRef.current = false;
 
+    // Case A: Previewing a past submitted attempt
+    if (options.attemptToPreview) {
+      setMode('review');
+      setQuestionOrder(rawQuestions.map((_, i) => i));
+      setCurrentIdx(0);
+      setPreviewAttempt(options.attemptToPreview);
+      setTimerRunning(false);
+      setExamSubmitted(true);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+
+    setPreviewAttempt(null);
+
+    // Case B: Continuing a paused / saved session
+    if (options.continueSession) {
+      const savedProg = allProgress[examId] || {};
+      const sess = savedProg.session || {};
+      const resumeMode = sess.mode || selectedMode || 'exam';
+      const resumeTime =
+        typeof sess.timeLeft === 'number' && sess.timeLeft > 0
+          ? sess.timeLeft
+          : EXAM_DURATION_SECONDS;
+      const resumeOrder =
+        Array.isArray(sess.questionOrder) && sess.questionOrder.length === rawQuestions.length
+          ? sess.questionOrder
+          : rawQuestions.map((_, i) => i);
+      const resumeIdx =
+        typeof sess.currentIdx === 'number' &&
+        sess.currentIdx >= 0 &&
+        sess.currentIdx < rawQuestions.length
+          ? sess.currentIdx
+          : 0;
+
+      setMode(resumeMode);
+      setQuestionOrder(resumeOrder);
+      setCurrentIdx(resumeIdx);
+      setExamSubmitted(false);
+      if (resumeMode === 'exam') {
+        setTimeLeft(resumeTime);
+        setTimerRunning(true);
+      } else {
+        setTimerRunning(false);
+      }
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
+    }
+
+    // Case C: Starting a brand-new session
     const indices = rawQuestions.map((_, i) => i);
     if (options.shuffle) {
       for (let i = indices.length - 1; i > 0; i--) {
@@ -599,26 +756,31 @@ export default function App() {
     }
     setQuestionOrder(indices);
     setCurrentIdx(0);
+    setMode(selectedMode);
     window.scrollTo({ top: 0, behavior: 'smooth' });
 
-    if (options.attemptToPreview) {
-      setPreviewAttempt(options.attemptToPreview);
-      setTimerRunning(false);
-      setExamSubmitted(true);
-      return;
-    }
-
-    setPreviewAttempt(null);
-
     if (selectedMode === 'exam') {
-      const emptyState = { answers: {}, revealed: {}, flagged: {} };
+      // Fresh Exam Mode: clear all choices and start 130:00 timer
+      const freshExamState = {
+        answers: {},
+        revealed: {},
+        flagged: {},
+        session: {
+          mode: 'exam',
+          timeLeft: EXAM_DURATION_SECONDS,
+          currentIdx: 0,
+          questionOrder: indices,
+          isPaused: true,
+          updatedAt: new Date().toISOString(),
+        },
+      };
       setAllProgress((prev) => {
-        const nextAll = { ...prev, [examId]: emptyState };
+        const nextAll = { ...prev, [examId]: freshExamState };
         saveProgressToStorage(nextAll);
         return nextAll;
       });
-      apiSyncProgress(examId, emptyState);
-      setTimeLeft(130 * 60);
+      apiSyncProgress(examId, freshExamState);
+      setTimeLeft(EXAM_DURATION_SECONDS);
       setTimerRunning(true);
       setExamSubmitted(false);
     } else {
@@ -677,7 +839,7 @@ export default function App() {
 
   const resetExamProgress = async (examId, e) => {
     if (e) e.stopPropagation();
-    if (!window.confirm('Reset your current in-progress answers for this test?')) return;
+    if (!window.confirm('Reset your current in-progress / paused session for this test?')) return;
     setAllProgress((prev) => {
       const next = { ...prev };
       delete next[examId];
@@ -774,10 +936,10 @@ export default function App() {
 
   const currentQuestion = filteredQuestions[currentIdx] || null;
 
-  // Handle selecting an option
+  // Handle selecting an option (also saves session timeLeft + currentIdx)
   const handleSelectOption = useCallback(
     (question, optionHtml) => {
-      if (previewAttempt) return;
+      if (previewAttempt || examPausedModal) return;
       if (mode === 'review') return;
       if (mode === 'exam' && examSubmitted) return;
 
@@ -811,10 +973,28 @@ export default function App() {
           ...prev,
           answers: { ...prev.answers, [qKey]: nextSelected },
           revealed: nextRevealed,
+          session: {
+            mode,
+            timeLeft,
+            currentIdx,
+            questionOrder,
+            isPaused: true,
+            updatedAt: new Date().toISOString(),
+          },
         };
       });
     },
-    [previewAttempt, mode, examSubmitted, instantCheck, updateExamProgress]
+    [
+      previewAttempt,
+      examPausedModal,
+      mode,
+      examSubmitted,
+      instantCheck,
+      timeLeft,
+      currentIdx,
+      questionOrder,
+      updateExamProgress,
+    ]
   );
 
   const toggleRevealCurrent = useCallback(() => {
@@ -838,12 +1018,28 @@ export default function App() {
         ...prev.flagged,
         [qKey]: !prev.flagged[qKey],
       },
+      session: {
+        mode,
+        timeLeft,
+        currentIdx,
+        questionOrder,
+        isPaused: true,
+        updatedAt: new Date().toISOString(),
+      },
     }));
-  }, [currentQuestion, previewAttempt, updateExamProgress]);
+  }, [
+    currentQuestion,
+    previewAttempt,
+    mode,
+    timeLeft,
+    currentIdx,
+    questionOrder,
+    updateExamProgress,
+  ]);
 
   // Keyboard navigation
   useEffect(() => {
-    if (!activeExamId || !currentQuestion) return;
+    if (!activeExamId || !currentQuestion || examPausedModal) return;
     const handleKeyDown = (e) => {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
       if (e.key === 'ArrowRight') {
@@ -877,6 +1073,7 @@ export default function App() {
     filteredQuestions.length,
     mode,
     previewAttempt,
+    examPausedModal,
     goToQuestion,
     toggleFlagCurrent,
     toggleRevealCurrent,
@@ -1222,7 +1419,7 @@ export default function App() {
                       Master all {sqliteInfo.questionsCount || 390} Exam Questions
                     </h2>
                     <p className="text-slate-300 text-xs sm:text-sm mt-1 max-w-2xl leading-relaxed">
-                      6 full-length practice exams (65 questions each) with detailed explanations, architecture diagrams, and timed simulation.
+                      6 full-length practice exams (65 questions each) with pause &amp; continue support, 130-minute exam timer, and detailed explanations.
                     </p>
                   </div>
                   <div className="grid grid-cols-3 gap-2.5 sm:gap-4 shrink-0">
@@ -1266,7 +1463,11 @@ export default function App() {
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
                   {allExamsList.map((exam, idx) => {
-                    const saved = allProgress[exam.id] || { answers: {}, flagged: {} };
+                    const saved = allProgress[exam.id] || {
+                      answers: {},
+                      flagged: {},
+                      session: null,
+                    };
                     const questions = exam.rawData?.attemptAnswers || [];
                     const totalQ = exam.totalQuestions || questions.length || 65;
 
@@ -1289,6 +1490,12 @@ export default function App() {
                         ? Math.round((correctCount / answeredCount) * 100)
                         : 0;
 
+                    const hasPausedSession =
+                      !!saved.session?.isPaused || answeredCount > 0;
+                    const pausedMode = saved.session?.mode || 'practice';
+                    const pausedTimeLeft = saved.session?.timeLeft;
+                    const pausedQuestionNum = (saved.session?.currentIdx ?? 0) + 1;
+
                     return (
                       <div
                         key={exam.id}
@@ -1310,10 +1517,10 @@ export default function App() {
                               </div>
                             </div>
 
-                            {answeredCount > 0 && (
+                            {hasPausedSession && (
                               <button
                                 onClick={(e) => resetExamProgress(exam.id, e)}
-                                title="Reset current practice progress"
+                                title="Reset current paused / in-progress session"
                                 className="p-2 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition cursor-pointer"
                               >
                                 <RotateCcw className="w-4 h-4" />
@@ -1331,6 +1538,12 @@ export default function App() {
                               <Clock className="w-3.5 h-3.5 text-slate-500" />
                               130m
                             </span>
+                            {hasPausedSession && (
+                              <span className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">
+                                <Pause className="w-3 h-3" />
+                                Paused ({pausedMode === 'exam' ? 'Exam' : 'Practice'})
+                              </span>
+                            )}
                           </div>
 
                           {/* User In-Progress Practice Bar */}
@@ -1339,7 +1552,7 @@ export default function App() {
                               <span className="font-medium text-slate-600 dark:text-slate-400">
                                 Progress: {answeredCount}/{totalQ} ({progressPct}%)
                               </span>
-                              {answeredCount > 0 && (
+                              {answeredCount > 0 && pausedMode !== 'exam' && (
                                 <span
                                   className={`font-semibold ${
                                     accuracyPct >= 72
@@ -1348,6 +1561,11 @@ export default function App() {
                                   }`}
                                 >
                                   {correctCount} Correct ({accuracyPct}%)
+                                </span>
+                              )}
+                              {pausedMode === 'exam' && typeof pausedTimeLeft === 'number' && (
+                                <span className="font-mono font-semibold text-amber-600 dark:text-amber-400">
+                                  ⏱ {formatTime(pausedTimeLeft)} left
                                 </span>
                               )}
                             </div>
@@ -1363,28 +1581,50 @@ export default function App() {
                         </div>
 
                         {/* Action Buttons Footer */}
-                        <div className="px-4 sm:px-6 py-3.5 bg-slate-50/70 dark:bg-slate-900/50 border-t border-slate-100 dark:border-slate-800 grid grid-cols-3 gap-2">
-                          <button
-                            onClick={() => startExam(exam.id, 'practice')}
-                            className="flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl font-semibold text-xs bg-amber-500 hover:bg-amber-600 active:scale-95 text-white shadow-xs transition cursor-pointer"
-                          >
-                            <BookOpen className="w-3.5 h-3.5 shrink-0" />
-                            <span>Practice</span>
-                          </button>
-                          <button
-                            onClick={() => startExam(exam.id, 'exam')}
-                            className="flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl font-semibold text-xs bg-slate-900 hover:bg-slate-800 dark:bg-slate-800 dark:hover:bg-slate-700 active:scale-95 text-white transition cursor-pointer"
-                          >
-                            <Play className="w-3.5 h-3.5 shrink-0" />
-                            <span>Exam</span>
-                          </button>
-                          <button
-                            onClick={() => startExam(exam.id, 'review')}
-                            className="flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl font-semibold text-xs bg-white hover:bg-slate-100 dark:bg-slate-900 dark:hover:bg-slate-800 active:scale-95 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 transition cursor-pointer"
-                          >
-                            <Eye className="w-3.5 h-3.5 shrink-0" />
-                            <span>Review</span>
-                          </button>
+                        <div className="px-4 sm:px-6 py-3.5 bg-slate-50/70 dark:bg-slate-900/50 border-t border-slate-100 dark:border-slate-800 space-y-2">
+                          {hasPausedSession && (
+                            <button
+                              onClick={() =>
+                                startExam(exam.id, pausedMode, { continueSession: true })
+                              }
+                              className="w-full flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl font-bold text-xs bg-emerald-600 hover:bg-emerald-700 active:scale-98 text-white shadow-xs transition cursor-pointer"
+                            >
+                              <Play className="w-3.5 h-3.5 fill-current" />
+                              <span>
+                                Continue {pausedMode === 'exam' ? 'Exam' : 'Practice'} (Q
+                                {pausedQuestionNum}/{totalQ}
+                                {pausedMode === 'exam' && typeof pausedTimeLeft === 'number'
+                                  ? ` • ${formatTime(pausedTimeLeft)}`
+                                  : ''}
+                                )
+                              </span>
+                            </button>
+                          )}
+
+                          <div className="grid grid-cols-3 gap-2">
+                            <button
+                              onClick={() => startExam(exam.id, 'practice')}
+                              className="flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl font-semibold text-xs bg-amber-500 hover:bg-amber-600 active:scale-95 text-white shadow-xs transition cursor-pointer"
+                            >
+                              <BookOpen className="w-3.5 h-3.5 shrink-0" />
+                              <span>Practice</span>
+                            </button>
+                            <button
+                              onClick={() => startExam(exam.id, 'exam')}
+                              className="flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl font-semibold text-xs bg-slate-900 hover:bg-slate-800 dark:bg-slate-800 dark:hover:bg-slate-700 active:scale-95 text-white transition cursor-pointer"
+                              title="Start a new timed exam with all choices cleared"
+                            >
+                              <Play className="w-3.5 h-3.5 shrink-0" />
+                              <span>{hasPausedSession ? 'New Exam' : 'Exam'}</span>
+                            </button>
+                            <button
+                              onClick={() => startExam(exam.id, 'review')}
+                              className="flex items-center justify-center gap-1.5 py-2.5 px-2 rounded-xl font-semibold text-xs bg-white hover:bg-slate-100 dark:bg-slate-900 dark:hover:bg-slate-800 active:scale-95 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 transition cursor-pointer"
+                            >
+                              <Eye className="w-3.5 h-3.5 shrink-0" />
+                              <span>Review</span>
+                            </button>
+                          </div>
                         </div>
                       </div>
                     );
@@ -1488,7 +1728,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* 1. SQLite Database Status & Backup Sync Card (No file paths or dangerous buttons) */}
+              {/* 1. SQLite Database Status & Backup Sync Card */}
               <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-4 sm:p-6 shadow-xs space-y-5">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-100 dark:border-slate-800">
                   <div className="flex items-start gap-3">
@@ -1839,10 +2079,7 @@ export default function App() {
           <div className="flex items-center justify-between gap-2 min-w-0">
             <div className="flex items-center gap-2 min-w-0">
               <button
-                onClick={() => {
-                  setPreviewAttempt(null);
-                  setActiveExamId(null);
-                }}
+                onClick={handleSaveAndExitToHome}
                 className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition shrink-0 active:scale-95 cursor-pointer"
               >
                 <ArrowLeft className="w-4 h-4" />
@@ -1857,6 +2094,13 @@ export default function App() {
                     <span className="text-amber-600 dark:text-amber-400 font-semibold">
                       Previewing Submission • {activeStats.correct}/{activeStats.total} ({activeStats.pct}%)
                     </span>
+                  ) : mode === 'exam' && !examSubmitted ? (
+                    <span>
+                      Answered {activeStats.answered}/{activeStats.total} •{' '}
+                      <span className="text-amber-600 dark:text-amber-400 font-medium">
+                        {activeStats.flagged} Flagged
+                      </span>
+                    </span>
                   ) : (
                     <>
                       {activeStats.answered}/{activeStats.total} answered •{' '}
@@ -1869,15 +2113,21 @@ export default function App() {
               </div>
             </div>
 
-            {/* Mobile right actions */}
+            {/* Mobile right actions: Timer + Pause/Continue button */}
             <div className="flex sm:hidden items-center gap-1.5 shrink-0">
               {mode === 'exam' && !examSubmitted && !previewAttempt && (
                 <button
-                  onClick={() => setTimerRunning((r) => !r)}
-                  className="flex items-center gap-1 bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300 px-2 py-1 rounded-lg text-[11px] font-mono font-semibold"
+                  onClick={handlePauseExam}
+                  className={`flex items-center gap-1 border px-2.5 py-1 rounded-xl text-xs font-mono font-bold transition active:scale-95 ${
+                    timeLeft <= 300
+                      ? 'bg-rose-50 dark:bg-rose-950/60 border-rose-300 dark:border-rose-800 text-rose-700 dark:text-rose-300 animate-pulse'
+                      : 'bg-amber-50 dark:bg-amber-950/60 border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300'
+                  }`}
+                  title="Tap to pause exam"
                 >
-                  <Clock className="w-3 h-3 text-amber-500" />
+                  <Clock className="w-3.5 h-3.5 text-amber-500" />
                   <span>{formatTime(timeLeft)}</span>
+                  <Pause className="w-3 h-3 ml-0.5" />
                 </button>
               )}
               <button
@@ -1910,15 +2160,30 @@ export default function App() {
                     key={item.id}
                     onClick={() => {
                       setPreviewAttempt(null);
+                      setExamPausedModal(false);
+                      autoSubmitTriggeredRef.current = false;
                       if (item.id === 'exam' && mode !== 'exam') {
-                        const emptyState = { answers: {}, revealed: {}, flagged: {} };
+                        const freshOrder = orderedQuestions.map((q) => q.origIndex);
+                        const emptyState = {
+                          answers: {},
+                          revealed: {},
+                          flagged: {},
+                          session: {
+                            mode: 'exam',
+                            timeLeft: EXAM_DURATION_SECONDS,
+                            currentIdx: 0,
+                            questionOrder: freshOrder,
+                            isPaused: true,
+                            updatedAt: new Date().toISOString(),
+                          },
+                        };
                         setAllProgress((prev) => {
                           const nextAll = { ...prev, [activeExamId]: emptyState };
                           saveProgressToStorage(nextAll);
                           return nextAll;
                         });
                         apiSyncProgress(activeExamId, emptyState);
-                        setTimeLeft(130 * 60);
+                        setTimeLeft(EXAM_DURATION_SECONDS);
                         setTimerRunning(true);
                         setExamSubmitted(false);
                         setStatusFilter('all');
@@ -1926,6 +2191,7 @@ export default function App() {
                         goToQuestion(0);
                       } else {
                         setExamSubmitted(false);
+                        setTimerRunning(false);
                       }
                       setMode(item.id);
                     }}
@@ -1947,7 +2213,7 @@ export default function App() {
                 onClick={() => saveSubmissionToHistory('exam')}
                 className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition shrink-0 cursor-pointer active:scale-95"
               >
-                Submit
+                Submit Exam
               </button>
             )}
 
@@ -1962,16 +2228,25 @@ export default function App() {
               </button>
             )}
 
+            {/* Desktop Timer + Pause Button & Utility Icons */}
             <div className="hidden sm:flex items-center gap-2">
               {mode === 'exam' && !examSubmitted && !previewAttempt && (
-                <div className="flex items-center gap-1.5 bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300 px-3 py-1.5 rounded-xl text-xs font-mono font-semibold">
+                <div
+                  className={`flex items-center gap-2 border px-3 py-1.5 rounded-xl text-xs font-mono font-bold ${
+                    timeLeft <= 300
+                      ? 'bg-rose-50 dark:bg-rose-950/60 border-rose-300 dark:border-rose-800 text-rose-700 dark:text-rose-300 animate-pulse'
+                      : 'bg-amber-50 dark:bg-amber-950/60 border-amber-200 dark:border-amber-800 text-amber-800 dark:text-amber-300'
+                  }`}
+                >
                   <Clock className="w-3.5 h-3.5 text-amber-500" />
                   <span>{formatTime(timeLeft)}</span>
                   <button
-                    onClick={() => setTimerRunning((r) => !r)}
-                    className="ml-1 p-0.5 hover:bg-amber-200/50 dark:hover:bg-amber-800/50 rounded"
+                    onClick={handlePauseExam}
+                    className="ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/20 hover:bg-amber-500/30 text-amber-900 dark:text-amber-200 font-sans font-semibold text-[11px] cursor-pointer transition"
+                    title="Pause Exam"
                   >
-                    {timerRunning ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+                    <Pause className="w-3 h-3" />
+                    <span>Pause</span>
                   </button>
                 </div>
               )}
@@ -2010,7 +2285,7 @@ export default function App() {
       </header>
 
       {/* Attempt Preview / Exam Results Summary Banner */}
-      {(previewAttempt || examSubmitted || activeStats.answered === activeStats.total) && (
+      {(previewAttempt || examSubmitted) && (
         <div className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800">
           <div className="max-w-7xl mx-auto px-3.5 sm:px-6 py-3 sm:py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2.5 sm:gap-4">
@@ -2019,7 +2294,7 @@ export default function App() {
                   <Eye className="w-3.5 h-3.5" />
                   {previewAttempt.isOriginalJson
                     ? 'Preview: Original JSON Attempt'
-                    : `Previewing Submission (${formatDateTime(previewAttempt.submittedAt)})`}
+                    : `Submitted Result (${formatDateTime(previewAttempt.submittedAt)})`}
                 </span>
               )}
               <div
@@ -2281,6 +2556,16 @@ export default function App() {
                     </button>
                   )}
 
+                  {!previewAttempt && mode === 'exam' && !examSubmitted && (
+                    <button
+                      onClick={handlePauseExam}
+                      className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-xs font-semibold bg-slate-200 hover:bg-slate-300 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 transition cursor-pointer"
+                    >
+                      <Pause className="w-4 h-4" />
+                      Pause Exam
+                    </button>
+                  )}
+
                   <button
                     onClick={() =>
                       goToQuestion(Math.min(filteredQuestions.length - 1, currentIdx + 1))
@@ -2374,6 +2659,14 @@ export default function App() {
                 {isExplanationVisible ? 'Hide' : 'Answer'}
               </span>
             </button>
+          ) : !previewAttempt && mode === 'exam' && !examSubmitted ? (
+            <button
+              onClick={handlePauseExam}
+              className="flex flex-col items-center justify-center py-1.5 rounded-xl bg-amber-500/15 text-amber-700 dark:text-amber-300 active:scale-95 transition"
+            >
+              <Pause className="w-4 h-4 my-0.5" />
+              <span className="text-[10px] font-semibold mt-0.5">Pause</span>
+            </button>
           ) : (
             <div className="flex flex-col items-center justify-center py-1.5 text-center">
               <span className="text-xs font-bold text-amber-600 dark:text-amber-400">
@@ -2413,6 +2706,61 @@ export default function App() {
         </div>
       </div>
 
+      {/* ============================================================================ */}
+      {/* EXAM PAUSED MODAL OVERLAY (Continue Exam or Save & Exit to Home)             */}
+      {/* ============================================================================ */}
+      {examPausedModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 w-full max-w-md rounded-2xl border border-slate-200 dark:border-slate-800 p-6 sm:p-8 shadow-2xl text-center">
+            <div className="w-14 h-14 rounded-2xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-500 mx-auto mb-4">
+              <Pause className="w-7 h-7" />
+            </div>
+            <h3 className="text-xl font-bold">Exam Paused</h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 mb-5">
+              Your timer is paused and your progress is saved in SQLite. You can continue right now or exit to the home page and resume later.
+            </p>
+
+            <div className="grid grid-cols-3 gap-2.5 mb-6 bg-slate-50 dark:bg-slate-800/60 p-3.5 rounded-xl border border-slate-200/70 dark:border-slate-800">
+              <div>
+                <div className="text-sm sm:text-base font-mono font-bold text-amber-600 dark:text-amber-400">
+                  {formatTime(timeLeft)}
+                </div>
+                <div className="text-[11px] text-slate-500">Time Left</div>
+              </div>
+              <div>
+                <div className="text-sm sm:text-base font-bold text-slate-800 dark:text-slate-200">
+                  Q{currentIdx + 1}/{orderedQuestions.length}
+                </div>
+                <div className="text-[11px] text-slate-500">Current</div>
+              </div>
+              <div>
+                <div className="text-sm sm:text-base font-bold text-emerald-600 dark:text-emerald-400">
+                  {activeStats.answered}/{activeStats.total}
+                </div>
+                <div className="text-[11px] text-slate-500">Answered</div>
+              </div>
+            </div>
+
+            <div className="space-y-2.5">
+              <button
+                onClick={handleContinueExamFromModal}
+                className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-bold text-sm bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm transition cursor-pointer active:scale-98"
+              >
+                <Play className="w-4 h-4 fill-current" />
+                <span>Continue Exam</span>
+              </button>
+
+              <button
+                onClick={handleSaveAndExitToHome}
+                className="w-full py-2.5 px-4 rounded-xl font-semibold text-xs bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition cursor-pointer"
+              >
+                Save &amp; Exit to Home Page
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* MOBILE SLIDE-UP QUESTION NAVIGATOR & FILTER SHEET */}
       {mobileDrawerOpen && (
         <div className="lg:hidden fixed inset-0 z-50 flex flex-col justify-end bg-black/60 backdrop-blur-xs">
@@ -2423,7 +2771,7 @@ export default function App() {
               <div>
                 <h3 className="font-bold text-sm">Question Navigator &amp; Filters</h3>
                 <p className="text-xs text-slate-500">
-                  Answered {activeStats.answered}/{activeStats.total} • Correct {activeStats.correct} ({activeStats.pct}%)
+                  Answered {activeStats.answered}/{activeStats.total}
                 </p>
               </div>
               <button

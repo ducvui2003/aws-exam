@@ -392,6 +392,7 @@ export function createSqliteApiMiddleware() {
             answers: JSON.parse(r.answers_json || '{}'),
             revealed: JSON.parse(r.revealed_json || '{}'),
             flagged: JSON.parse(r.flagged_json || '{}'),
+            session: JSON.parse(r.session_json || 'null'),
           };
         }
 
@@ -460,18 +461,20 @@ export function createSqliteApiMiddleware() {
           db.prepare('DELETE FROM exam_progress WHERE exam_id = ?').run(examId);
         } else {
           db.prepare(
-            `INSERT INTO exam_progress (exam_id, answers_json, revealed_json, flagged_json, updated_at)
-             VALUES (?, ?, ?, ?, ?)
+            `INSERT INTO exam_progress (exam_id, answers_json, revealed_json, flagged_json, session_json, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)
              ON CONFLICT(exam_id) DO UPDATE SET
                answers_json = excluded.answers_json,
                revealed_json = excluded.revealed_json,
                flagged_json = excluded.flagged_json,
+               session_json = excluded.session_json,
                updated_at = excluded.updated_at`
           ).run(
             examId,
             JSON.stringify(state.answers || {}),
             JSON.stringify(state.revealed || {}),
             JSON.stringify(state.flagged || {}),
+            JSON.stringify(state.session || null),
             new Date().toISOString()
           );
         }
